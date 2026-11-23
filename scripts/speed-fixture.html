@@ -1,0 +1,54 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>MOOC 倍速实播验证</title>
+<style>body{font:16px/1.6 system-ui;background:#122033;color:#eef4ff;padding:24px;max-width:920px;margin:auto}video{width:480px;background:black}canvas{display:none}pre{white-space:pre-wrap;background:#20324b;padding:16px;border-radius:12px}</style>
+<h1>MOOC 倍速实播验证</h1><p>使用浏览器录制的本地 WebM 视频。检验真实解码播放时间，不调用模型或访问课程。</p>
+<video muted playsinline></video><canvas width="480" height="270"></canvas><pre id="status">正在生成12秒本地测试视频…</pre><pre id="results"></pre>
+<script>window.module = {exports: {}};</script><script src="/helper.js"></script>
+<script>
+(async () => {
+  const status = document.querySelector('#status'), output = document.querySelector('#results');
+  const result = { environment: navigator.userAgent, checks: [], measurements: [], passed: false };
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const check = (name, ok) => { result.checks.push({name, passed: !!ok}); if (!ok) throw new Error(name); };
+  let timer, drawTimer, helper;
+  try {
+    const canvas = document.querySelector('canvas'), ctx = canvas.getContext('2d');
+    const begin = performance.now();
+    drawTimer = setInterval(() => { ctx.fillStyle = '#224760'; ctx.fillRect(0,0,480,270); ctx.fillStyle = 'white'; ctx.font = '30px system-ui'; ctx.fillText(`本地视频 ${(performance.now()-begin).toFixed(0)} ms`, 30, 140); }, 40);
+    const stream = canvas.captureStream(25), recorder = new MediaRecorder(stream, {mimeType:'video/webm;codecs=vp8'}), chunks = [];
+    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
+    const recorded = new Promise(resolve => { recorder.onstop = () => resolve(new Blob(chunks, {type:'video/webm'})); });
+    recorder.start(); await sleep(12000); recorder.stop();
+    const blob = await recorded; clearInterval(drawTimer); stream.getTracks().forEach(track => track.stop());
+    let video = document.querySelector('video'); video.src = URL.createObjectURL(blob);
+    await new Promise(resolve => video.addEventListener('loadedmetadata', resolve, {once:true}));
+    const {Helper} = window.module.exports;
+    helper = new Helper(document, sessionStorage, async () => { throw new Error('No model calls allowed'); }, {playbackRate:1});
+    // The production URL guard is tested separately. This local harness exercises the real media controller.
+    helper.courseAllowed = () => true;
+    helper.render = () => { status.textContent = helper.rateStatus(); };
+    check('旧配置自动迁移为2', helper.config.playbackRate === 2);
+    timer = setInterval(() => void helper.tick(), 100);
+    helper.start(); await video.play(); await sleep(3500);
+    const ratio = helper.measuredRate;
+    result.measurements.push({phase:'initial', playbackRate:video.playbackRate, measuredRate:ratio});
+    check('真实播放实测接近2倍速', ratio !== null && ratio > 1.8 && ratio < 2.2);
+    helper.pause(); video.playbackRate = 1; await sleep(100); check('暂停后可自行改为1倍速', video.playbackRate === 1);
+    video.currentTime = 0; helper.start(); await video.play();
+    video.playbackRate = 1; await sleep(150); check('播放器重置1倍速后自动恢复2', video.playbackRate === 2);
+    await sleep(3400);
+    result.measurements.push({phase:'afterReset', playbackRate:video.playbackRate, measuredRate:helper.measuredRate});
+    check('恢复后真实播放接近2倍速', helper.measuredRate !== null && helper.measuredRate > 1.8 && helper.measuredRate < 2.2);
+    video.pause(); const next = video.cloneNode(); next.src = URL.createObjectURL(blob); next.muted = true; video.replaceWith(next); video = next;
+    await new Promise(resolve => video.addEventListener('loadedmetadata', resolve, {once:true}));
+    await helper.tick(); await sleep(150); check('切换新视频仍设置为2倍速', video.playbackRate === 2);
+    helper.stop(); video.playbackRate = 1.5; await sleep(100); check('停止后可自行改为1.5倍速', video.playbackRate === 1.5);
+    result.passed = true;
+  } catch(error) { result.error = error.message; }
+  finally {
+    clearInterval(timer); clearInterval(drawTimer); helper?.stop();
+    status.textContent = result.passed ? '实播验证通过' : `验证失败：${result.error}`;
+    output.textContent = JSON.stringify(result, null, 2);
+    await fetch('/results', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(result)});
+  }
+})();
+</script></html>
