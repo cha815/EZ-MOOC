@@ -125,11 +125,12 @@ test('成功反馈中的继续按钮只点击一次', async () => {
   let count = 0; button.onclick = () => count++;
   await helper.tick(); await helper.tick(); assert.equal(count, 1);
 });
-test('错误反馈不会再次请求或试选其他选项', async () => {
+test('错误反馈自动继续，不再次请求或试选其他选项', async () => {
   let calls = 0;
   const { helper, dom } = fixture(quiz, async () => { calls++; return answer; });
-  await helper.tick(); dom.window.document.querySelector('[data-mooc-stem]').insertAdjacentHTML('afterend', '<p>回答错误</p>');
-  await helper.tick(); assert.equal(helper.state, 'paused'); assert.equal(calls, 1);
+  await helper.tick(); dom.window.document.querySelector('[data-mooc-stem]').insertAdjacentHTML('afterend', '<p>回答错误</p><button data-mooc-continue>继续学习</button>');
+  let continued = 0; dom.window.document.querySelector('[data-mooc-continue]').onclick = () => continued++;
+  await helper.tick(); await helper.tick(); assert.equal(helper.state, 'running'); assert.equal(calls, 1); assert.equal(continued, 1);
 });
 test('延迟成功的播放请求不会撤销用户暂停', async () => {
   const { helper, video } = fixture(); let finish;
@@ -460,4 +461,49 @@ test('播放器拒绝设置时显示真实1倍速和未确认原因', async () =
   await helper.tick();
   assert.match(helper.rateStatus(), /读数1倍速/); assert.match(helper.rateStatus(), /未确认/);
   assert.doesNotMatch(helper.rateStatus(), /读数2倍速/); helper.stop();
+});
+test('选择题答错后关闭反馈并自动恢复2倍速播放', async () => {
+  const { helper, dom, video, plays } = fixture(quiz);
+  await helper.tick();
+  const root = dom.window.document.querySelector('[data-mooc-practice]');
+  root.insertAdjacentHTML('beforeend', '<p>回答错误</p><button data-mooc-continue>继续学习</button>');
+  root.querySelector('[data-mooc-continue]').onclick = () => root.remove();
+  await helper.tick(); await helper.tick();
+  assert.equal(helper.state, 'running'); assert.equal(video.paused, false); assert.equal(video.playbackRate, 2); assert.equal(plays(), 1);
+});
+test('填空错误反馈中输入框被禁用或移除，仍点击继续一次', async () => {
+  for (const removed of [false, true]) {
+    const { helper, dom } = fixture(fillQuiz, async () => fillAnswer);
+    const root = dom.window.document.querySelector('[role="dialog"]');
+    root.oninput = () => { root.querySelector('button').disabled = false; };
+    await helper.tick();
+    const input = root.querySelector('input');
+    if (removed) input.remove(); else input.disabled = true;
+    root.querySelector('button').remove();
+    root.insertAdjacentHTML('beforeend', '<p>回答错误</p><button>继续学习</button>');
+    let count = 0; root.querySelector('button').onclick = () => count++;
+    await helper.tick(); await helper.tick(); assert.equal(count, 1); assert.equal(helper.state, 'running');
+  }
+});
+test('刷新后已显示错误结果，不依赖旧pending和提交记录即可继续', async () => {
+  let calls = 0;
+  const { helper } = fixture('<div role="dialog" class="mooc-video-player__anchor-overlay is-blocking"><div class="rich-text-unit-renderer">填空题</div><p>回答错误</p><button>继续学习</button></div>', async () => { calls++; return answer; });
+  let count = 0; helper.doc.querySelector('[role="dialog"] button').onclick = () => count++;
+  await helper.tick(); assert.equal(count, 1); assert.equal(calls, 0); assert.equal(helper.state, 'running');
+});
+test('题干和选项里的回答错误字样不能当作结果跳过', async () => {
+  const { helper, dom } = fixture(quiz.replace('哪个协议提供可靠传输？', '回答错误').replace('>UDP</label>', '>回答错误</label>'));
+  let submissions = 0; dom.window.document.querySelector('[data-mooc-practice] button').onclick = () => submissions++;
+  await helper.tick(); assert.equal(submissions, 1); assert.equal(helper.feedbackPending, null);
+});
+test('反馈有多个继续按钮时暂停，不点击任何按钮', async () => {
+  const { helper } = fixture('<div role="dialog" class="mooc-video-player__anchor-overlay is-blocking"><p>回答错误</p><button>继续学习</button><button>继续学习</button></div>');
+  let count = 0; helper.doc.querySelectorAll('[role="dialog"] button').forEach(e => { e.onclick = () => count++; });
+  await helper.tick(); assert.equal(count, 0); assert.equal(helper.state, 'paused');
+});
+test('反馈点击继续后未关闭，超时暂停而不重复点击', async () => {
+  const { helper } = fixture('<div role="dialog" class="mooc-video-player__anchor-overlay is-blocking"><p>回答错误</p><button>继续学习</button></div>');
+  let count = 0; helper.doc.querySelector('[role="dialog"] button').onclick = () => count++;
+  await helper.tick(); helper.feedbackPending.at = Date.now() - 16000;
+  await helper.tick(); assert.equal(count, 1); assert.equal(helper.state, 'paused');
 });

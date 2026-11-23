@@ -4,7 +4,7 @@
 // @license      MIT
 // @homepageURL  https://github.com/cha815/EZ-MOOC
 // @supportURL   https://github.com/cha815/EZ-MOOC/issues
-// @version      0.9.0
+// @version      0.9.1
 // @description  正常播放、断点续播和不计分练习辅助，支持知识作答或课程资料作答
 // @match        https://www.icourse163.org/mooc/learn/*
 // @match        https://www.icourse163.org/course/*
@@ -66,6 +66,7 @@
       this.video = null; this.key = ''; this.busy = false; this.logs = []; this.retries = 0;
       this.lastTime = -1; this.lastMove = Date.now(); this.lastAttempt = 0;
       this.restored = false; this.navigation = null; this.pending = null; this.nativeWait = null;
+      this.feedbackPending = null;
       this.rateBinding = null; this.rateSample = null; this.measuredRate = null; this.rateError = '';
       this.now = () => this.doc.defaultView.performance.now();
     }
@@ -171,7 +172,7 @@
       const video = videos[0];
       if (!video) {
         this.bindRateEvents(null);
-        if (this.video) { this.epoch++; this.video = null; this.pending = null; }
+        if (this.video) { this.epoch++; this.video = null; this.pending = null; this.feedbackPending = null; }
         return null;
       }
       // During a source change, currentSrc can still point to the previous resource.
@@ -181,7 +182,7 @@
       const title = selected.length === 1 ? norm(selected[0].querySelector('[title]')?.getAttribute('title') || selected[0].getAttribute('aria-label') || selected[0].textContent) : '';
       if (video !== this.video || key !== this.key) {
         this.resetRateMeasurement();
-        this.epoch++; this.pending = null;
+        this.epoch++; this.pending = null; this.feedbackPending = null;
         this.video = video; this.key = key; this.restored = false;
         this.retries = 0; this.lastAttempt = 0; this.lastTime = -1; this.lastMove = Date.now(); this.navigation = null; this.nativeWait = null;
         this.title = title;
@@ -209,18 +210,39 @@
       const id = `mooc-submitted:${this.key}:${JSON.stringify(question)}`;
       return { question, elements, inputs, id };
     }
+    handleFeedback(root) {
+      const stems = [...root.querySelectorAll(this.config.stem)];
+      // Only recognize separate result text, never words inside a question or an option.
+      const messages = [...root.querySelectorAll('p, [role="status"], [data-mooc-feedback]')]
+        .filter(e => visible(e) && !e.closest('label') && !stems.some(stem => stem.contains(e)))
+        .map(e => norm(e.textContent));
+      const result = messages.find(text => /^(回答错误|回答不正确|答案错误|回答正确|答案正确|提交成功)[。！!]?$/u.test(text));
+      if (!result) return false;
+      const stem = norm(stems[0]?.textContent);
+      const key = `mooc-feedback:${this.key}:${stem}:${result}`;
+      const controls = [...root.querySelectorAll(this.config.continue)].filter(e => visible(e) && !e.disabled && /^(继续|继续播放|继续学习|完成)$/.test(norm(e.textContent)));
+      if (!this.feedbackPending || this.feedbackPending.key !== key) {
+        this.feedbackPending = { key, at: Date.now(), continued: false };
+        if (this.storage.getItem(key)) { this.pause('已点击过继续学习但反馈仍存在，请手动确认'); return true; }
+      }
+      const pending = this.feedbackPending;
+      if (controls.length > 1) { this.pause('继续学习按钮未唯一识别，请手动处理'); return true; }
+      if (controls.length === 1 && !pending.continued) {
+        pending.continued = true; pending.at = Date.now();
+        this.storage.setItem(key, 'continued');
+        controls[0].click();
+        this.log(`${result}，已点击继续学习；不重新答题`);
+      } else if (Date.now() - pending.at > 15000) {
+        this.pause('练习反馈未关闭或继续按钮不可用，请手动确认');
+      }
+      return true;
+    }
     async handleQuiz(root) {
       this.video?.pause();
+      // Result screens can disable or remove inputs. Handle them before reading an unanswered question.
+      if (this.handleFeedback(root)) return;
       const item = this.readQuestion(root);
       if (this.storage.getItem(item.id)) {
-        const text = norm(root.textContent);
-        if (/回答错误|回答不正确|答案错误/.test(text)) return this.pause('本题反馈为错误，请手动检查，脚本不会改选重试');
-        if (this.pending?.id === item.id && /回答正确|提交成功|答案正确/.test(text)) {
-          const controls = [...root.querySelectorAll(this.config.continue)].filter(e => visible(e) && !e.disabled && /^(继续|继续播放|继续学习|完成)$/.test(norm(e.textContent)));
-          if (controls.length === 1 && !this.pending.continued) {
-            this.pending.continued = true; controls[0].click(); this.log('已确认提交成功并继续'); return;
-          }
-        }
         // Never retry a submission whose result is unknown, including across refreshes.
         if (!this.pending || this.pending.id !== item.id || Date.now() - this.pending.at > 15000) this.pause('此题已提交或提交结果不明，请手动确认后继续');
         return;
@@ -296,6 +318,7 @@
         if (quizzes.length) { await this.handleQuiz(quizzes[0]); return; }
         const unknown = this.all('[role="dialog"], .m-popover, .m-video-question').some(e => e.matches('[role="dialog"]') || e.querySelector('input[type="radio"], input[type="checkbox"], input[placeholder*="验证码"]'));
         if (unknown) return this.pause('发现未识别的题目或验证弹窗，请手动处理并配置选择器');
+        this.feedbackPending = null;
         if (this.pending) {
           const controls = this.all(this.config.continue).filter(e => !e.disabled && /^(继续|继续播放|继续学习|完成)$/.test(norm(e.textContent)));
           if (controls.length === 1) controls[0].click();
